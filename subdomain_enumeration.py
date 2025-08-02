@@ -1,147 +1,123 @@
 import tkinter as tk
-from tkinter import scrolledtext, messagebox
-from threading import Thread
-from urllib.parse import urljoin
-import requests
-from bs4 import BeautifulSoup
-import re
-import datetime
+from tkinter import filedialog, scrolledtext, messagebox
+import socket
+import threading
+from queue import Queue
 
-class RecursiveWebCrawler:
-    def __init__(self, start_url, max_depth, output_callback):
-        self.start_url = start_url
-        self.max_depth = max_depth
-        self.output_callback = output_callback
-        self.found_subdomains = set()
-        self.discovered_links = set()
-        self.javascript_files = set()
-
-    def run(self):
-        self.output_callback("=" * 80 + "\n")
-        start_time = datetime.datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-        self.output_callback(f"Start time: {start_time}\n")
-        self.output_callback(f"Starting URL: {self.start_url}\n")
-        self.output_callback(f"Maximum depth: {self.max_depth}\n")
-        self.output_callback("=" * 80 + "\n")
-
-        self._crawl(self.start_url, current_depth=1)
-
-        self.output_callback("\nDiscovered Subdomains:\n")
-        if self.found_subdomains:
-            for subdomain in self.found_subdomains:
-                self.output_callback(f"{subdomain}\n")
-        else:
-            self.output_callback("None found\n")
-
-        self.output_callback("\nDiscovered Links:\n")
-        if self.discovered_links:
-            for link in self.discovered_links:
-                self.output_callback(f"{link}\n")
-        else:
-            self.output_callback("None found\n")
-
-        self.output_callback("\nJavaScript Files:\n")
-        if self.javascript_files:
-            for js_file in self.javascript_files:
-                self.output_callback(f"{js_file}\n")
-        else:
-            self.output_callback("None found\n")
-
-        self.output_callback("=" * 80 + "\n")
-        self.output_callback("Crawling completed.\n")
-
-    def _crawl(self, url, current_depth):
-        if current_depth > self.max_depth:
-            return
-
-        try:
-            resp = requests.get(url, timeout=3, allow_redirects=True)
-            resp.raise_for_status()
-        except requests.RequestException as e:
-            self.output_callback(f"Error fetching {url}: {str(e)}\n")
-            return
-
-        page = BeautifulSoup(resp.text, 'html.parser')
-
-        # Extract anchor tags
-        for link in page.find_all('a', href=True):
-            href = link['href']
-            # Check for subdomains
-            subdomain_pattern = r"https?://([a-zA-Z0-9.-]+)"
-            match = re.match(subdomain_pattern, href)
-            if match and href not in self.found_subdomains:
-                self.found_subdomains.add(href)
-                self.output_callback(f"Found subdomain: {href}\n")
-            else:
-                # Handle relative/internal links
-                full_url = urljoin(url, href)
-                if full_url not in self.discovered_links:
-                    self.discovered_links.add(full_url)
-                    self.output_callback(f"Found link: {full_url}\n")
-                    self._crawl(full_url, current_depth + 1)
-
-        # Extract JavaScript files
-        for script in page.find_all('script', src=True):
-            js_url = urljoin(url, script['src'])
-            self.javascript_files.add(js_url)
-            self.output_callback(f"Found JavaScript file: {js_url}\n")
-
-class CrawlerGUI:
+class SubdomainEnumeratorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Recursive Web Crawler")
-        self.root.geometry("700x600")
+        self.root.title("Advanced Subdomain Enumerator")
+        self.root.geometry("600x500")
 
-        self.url_label = tk.Label(root, text="Target URL:")
-        self.url_label.pack()
+        # Domain input
+        tk.Label(root, text="Target Domain:").pack(anchor="w", padx=10, pady=(10, 0))
+        self.domain_entry = tk.Entry(root, width=50)
+        self.domain_entry.pack(anchor="w", padx=10)
 
-        self.url_entry = tk.Entry(root, width=50)
-        self.url_entry.pack()
+        # Wordlist file
+        tk.Label(root, text="Subdomain Wordlist:").pack(anchor="w", padx=10, pady=(10, 0))
+        frame = tk.Frame(root)
+        frame.pack(anchor="w", padx=10)
+        self.wordlist_path = tk.StringVar()
+        tk.Entry(frame, textvariable=self.wordlist_path, width=40).pack(side="left")
+        tk.Button(frame, text="Browse", command=self.browse_file).pack(side="left", padx=5)
 
-        self.depth_label = tk.Label(root, text="Crawl Depth:")
-        self.depth_label.pack()
+        # Start button
+        self.start_button = tk.Button(root, text="Start Enumeration", command=self.start_enumeration)
+        self.start_button.pack(pady=10)
 
-        self.depth_entry = tk.Entry(root, width=10)
-        self.depth_entry.pack()
+        # Output box
+        tk.Label(root, text="Results:").pack(anchor="w", padx=10)
+        self.output_box = scrolledtext.ScrolledText(root, height=20, width=70)
+        self.output_box.pack(padx=10, pady=5)
 
-        self.start_button = tk.Button(root, text="Start Crawling", command=self.start_crawl_thread)
-        self.start_button.pack()
+        # Threading variables
+        self.queue = Queue()
+        self.threads = []
+        self.stop_flag = False
 
-        self.output_box = scrolledtext.ScrolledText(root, height=20, width=80)
-        self.output_box.pack()
+    def browse_file(self):
+        filename = filedialog.askopenfilename(
+            title="Select Wordlist",
+            filetypes=(("Text files", "*.txt"), ("All files", "*.*")))
+        if filename:
+            self.wordlist_path.set(filename)
 
-    def output(self, message):
-        self.output_box.insert(tk.END, message)
-        self.output_box.see(tk.END)
-
-    def start_crawl_thread(self):
-        url = self.url_entry.get().strip()
-        depth = self.depth_entry.get().strip()
-
-        if not url:
-            messagebox.showerror("Error", "Please enter a target URL.")
-            return
-
+    def resolve_subdomain(self, subdomain):
+        full_domain = f"{subdomain}.{self.domain}"
         try:
-            depth = int(depth)
-            if depth <= 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror("Error", "Please enter a valid positive integer for depth.")
+            ip = socket.gethostbyname(full_domain)
+            self.queue.put(f"[+] Found: {full_domain} ({ip})\n")
+        except socket.gaierror:
+            # Domain does not resolve
+            pass
+
+    def worker(self):
+        while not self.stop_flag:
+            try:
+                subdomain = self.subdomains_queue.get_nowait()
+            except:
+                break
+            self.resolve_subdomain(subdomain)
+            self.subdomains_queue.task_done()
+
+    def update_output(self):
+        while not self.queue.empty():
+            line = self.queue.get()
+            self.output_box.insert(tk.END, line)
+            self.output_box.see(tk.END)
+        if any(t.is_alive() for t in self.threads):
+            self.root.after(100, self.update_output)
+        else:
+            self.start_button.config(state=tk.NORMAL)
+            self.output_box.insert(tk.END, "\nEnumeration completed.\n")
+
+    def start_enumeration(self):
+        self.domain = self.domain_entry.get().strip()
+        wordlist_file = self.wordlist_path.get()
+
+        if not self.domain:
+            messagebox.showerror("Error", "Please enter a target domain.")
+            return
+        if not wordlist_file:
+            messagebox.showerror("Error", "Please select a subdomain wordlist file.")
             return
 
-        self.output_box.delete(1.0, tk.END)
+        # Clear previous output
+        self.output_box.delete("1.0", tk.END)
+        self.output_box.insert(tk.END, f"Starting subdomain enumeration on {self.domain}...\n\n")
+
+        # Load wordlist
+        try:
+            with open(wordlist_file, "r") as f:
+                subdomains = [line.strip() for line in f if line.strip()]
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to read wordlist file:\n{e}")
+            return
+
+        self.subdomains_queue = Queue()
+        for sub in subdomains:
+            self.subdomains_queue.put(sub)
+
+        # Disable start button
         self.start_button.config(state=tk.DISABLED)
 
-        thread = Thread(target=self.run_crawler, args=(url, depth), daemon=True)
-        thread.start()
+        # Start worker threads
+        self.stop_flag = False
+        self.threads = []
+        thread_count = min(30, len(subdomains))  # max 30 threads or less
 
-    def run_crawler(self, url, depth):
-        crawler = RecursiveWebCrawler(url, depth, self.output)
-        crawler.run()
-        self.start_button.config(state=tk.NORMAL)
+        for _ in range(thread_count):
+            t = threading.Thread(target=self.worker)
+            t.daemon = True
+            t.start()
+            self.threads.append(t)
+
+        # Start updating output box
+        self.update_output()
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = CrawlerGUI(root)
+    app = SubdomainEnumeratorGUI(root)
     root.mainloop()
